@@ -1,13 +1,16 @@
 #! /usr/bin/env python
 #-*- coding: utf-8 -*-
 
-import requests
+import requesocks as requests
+# import requests
 from bs4 import BeautifulSoup
 import os
 
+
 class Tutsplus:
 
-    login_url= 'https://tutsplus.com/amember/login.php'
+    login_url= 'https://tutsplus.com/sign_in'
+    login_post_url = 'https://tutsplus.com/sessions'
 
     def __init__(self, username, password):
 
@@ -25,22 +28,32 @@ class Tutsplus:
     # It logs in and store the sesson for the future requests
     def login(self):
         self.s = requests.session()
-        soup = BeautifulSoup(self.get_source(self.login_url))
-        login_attempt_id =  soup.find_all(attrs={"name": "login_attempt_id"})[0]['value']
 
+        #self.s.proxies = {'http': 'http://127.0.0.1:8087','https': 'http://127.0.0.1:8087'}
+                           
+        soup = BeautifulSoup(self.get_source(self.login_url))
+        authenticity_token =  soup.find_all(attrs={"name": "authenticity_token"})[0]['value']
+        utf8 =  soup.find_all(attrs={"name": "utf8"})[0]['value']
         data = {
-            "amember_login":self.username,
-            "amember_pass":self.password,
-            "remember_login":1,
-            'login_attempt_id' : login_attempt_id
+            'utf8':utf8,
+            'session[login]':self.username,
+            'session[password]':self.password,
+            'authenticity_token' : authenticity_token
         }
 
-        self.s.post(self.login_url, data = data)
+        self.s.post(soup.select('.sign-in__form')[0]['action'], data = data)
+
+        soup = BeautifulSoup(self.get_source('https://tutsplus.com/account/courses'))
+        account_name = soup.select('.account-header__name')[0].string
+
+        if not account_name :
+            return False
+
+        print 'Logined success, account name: '+account_name
         return True
 
     # Download all video from a course url
     def download_course(self, url):
-
         # Variable needed to increment the video number
         self.video_number = 1
 
@@ -49,7 +62,7 @@ class Tutsplus:
         soup = BeautifulSoup(source)
 
         # the course's name
-        self.course_title = soup.select('.title-text')[0].string
+        self.course_title = soup.select('.content-header__title')[0].string.replace('?','')
         if not os.path.exists(self.course_title) :
             os.makedirs(self.course_title)
 
@@ -74,31 +87,21 @@ class Tutsplus:
     #   "link" : 'http://link_to_download'
     # }
     def download_video(self,lesson):
-
-        source = self.get_source(lesson['link'])
-
-        soup = BeautifulSoup(source)
-
-        download_link= soup.select('.post-buttons > a')
-
         # If it finds more than 1 download link it will skip
         # the video files and will download the video only
-        if len(download_link) == 1:
-            download_link = download_link[0]
-        else:
-            download_link = download_link[1]
-
+        download_link = lesson['link']
         # String name of the file
-        name = self.course_title + '/[' + str(self.video_number) + '] ' + lesson['titolo'].replace('/','-')
-        self.download_file(download_link['href'],name)
+        name = self.course_title + '/[' + str(self.video_number) + '] ' + lesson['titolo'].replace('/','-').replace('?','').replace(': ','-').replace(self.course_title+'__', '')
+        self.download_file(download_link,name)
         print '[*] Downloaded > ' + lesson['titolo']
 
     # Function who downloads the file itself
     def download_file(self,url, name):
-        # name = url.split('/')[-1]
-        # NOTE the stream=True parameter
         name = name + '.mp4'
-        r = self.s.get(url, stream=True)
+        r = self.s.post(url, self.download_access_data)
+        url = r.headers['location']
+        r = self.s.get(url)
+
         if not os.path.isfile(name) :
             with open(name, 'wb') as f:
                 for chunk in r.iter_content(chunk_size=1024):
@@ -109,19 +112,28 @@ class Tutsplus:
 
     # return an array with all the information about a video (title, url)
     def get_info_from_course(self, soup):
+        if not self.set_download_token(soup):
+            return []
         arr = []
-        videos = soup.select('.section-title > a')
-
+        videos = soup.select('.lesson-index__lesson .lesson-index__download-link')
         for video in videos:
-            if video.string is not None:
-                titolo = video.string
-                link = video['href']
-
-                info = {
-                    "titolo":titolo,
-                    "link":link
-                }
-                arr.append(info)
-
+            titolo = video['data-ga-event-label']
+            link = video['href']
+            info = {
+                "titolo":titolo,
+                "link":link
+            }
+            arr.append(info)
         return arr
 
+    # Function to set download token
+    def set_download_token(self, soup):
+        method = 'post'
+        token = soup.find_all(attrs={"name": "csrf-token"})[0]['content']
+        if not token:
+            return False
+        self.download_access_data = {
+            'authenticity_token':token,
+            '_method':method
+        }
+        return True
